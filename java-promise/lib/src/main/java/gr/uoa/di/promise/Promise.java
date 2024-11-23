@@ -44,143 +44,136 @@ public class Promise<V> {
         REJECTED
     }
 
-    class promiseState {
+    volatile public Status promiseStatus;
+    volatile public ValueOrError<V> returnValue;
 
-        public Status promiseStatus;
-        public ValueOrError<V> returnValue;
-
-        private Queue<Function<V, ?>> fulfilledQueue;
-        private Queue<Consumer<Throwable>> rejectedQueue;
-
-        public promiseState() {
-            promiseStatus = Status.PENDING;
-            fulfilledQueue = new LinkedList<>();
-            rejectedQueue = new LinkedList<>();
-            returnValue = null;
-        }
-
-        public void addToFulfQueue(Function<V, ?> onResolve) {
-            fulfilledQueue.add(onResolve);
-        }
-
-        public Function<V, ?> getNextResolve() {
-            return fulfilledQueue.poll();
-        }
-
-        public boolean hasNextResolve() {
-            return !fulfilledQueue.isEmpty();
-        }
-
-        public void addToRejQueue(Consumer<Throwable> onReject) {
-            rejectedQueue.add(onReject);
-        }
-
-        public Consumer<Throwable> getNextReject() {
-            return rejectedQueue.poll();
-        }
-
-        public boolean hasNextReject() {
-            return !rejectedQueue.isEmpty();
-        }
-
-    }
-
-    private promiseState promState;
+    private Queue<Function<V, ?>> fulfilledQueue;
+    private Queue<Consumer<Throwable>> rejectedQueue;
 
     public Promise(PromiseExecutor<V> executor) {
-        this.promState = new promiseState();
-        initNewPromise(executor);
+        promiseStatus = Status.PENDING;
+        
+        fulfilledQueue = new LinkedList<>();
+        rejectedQueue = new LinkedList<>();
+        returnValue = null;
+        
+        startPromise(executor);
     }
 
-    private void initNewPromise(PromiseExecutor<V> executor) {
+    private synchronized void setPromiseStatus(Status stat) {
+        promiseStatus = stat;
+    }
+
+    private synchronized Status getPromiseStatus() {
+        return promiseStatus;
+    }
+
+    private synchronized void setValueOrError(ValueOrError<V> val) {
+        returnValue = val;
+    }
+
+    private synchronized ValueOrError<V> getValueOrError() {
+        return returnValue;
+    }
+
+    private synchronized void addToFulfQueue(Function<V, ?> onResolve) {
+        fulfilledQueue.add(onResolve);
+    }
+
+    private synchronized Function<V, ?> getNextResolve() {
+        return fulfilledQueue.poll();
+    }
+
+    private synchronized boolean hasNextResolve() {
+        return !fulfilledQueue.isEmpty();
+    }
+
+    private synchronized void addToRejQueue(Consumer<Throwable> onReject) {
+        rejectedQueue.add(onReject);
+    }
+
+    private synchronized Consumer<Throwable> getNextReject() {
+        return rejectedQueue.poll();
+    }
+
+    private synchronized boolean hasNextReject() {
+        return !rejectedQueue.isEmpty();
+    }
+
+    private void startPromise(PromiseExecutor<V> executor) {
         new Thread(() -> {
-                executor.execute(this::onResolve, this::onReject);
+            executor.execute(this::onResolve, this::onReject);
         }).start();
     }
 
     private void onResolve(V value) {
-        synchronized(promState) {
-            if (promState.promiseStatus != Status.PENDING) {
-                return;
-            }
-            promState.promiseStatus = Status.FULFILLED;
-            promState.returnValue = ValueOrError.Value.of(value);
-            
-            while (promState.hasNextResolve()) {
-                Function<V, ?> callback = promState.getNextResolve();
-                try {
-                    callback.apply(value);
-                } 
-                catch (Exception e) {
-                    System.err.println("Error in resolve callback: " + e.getMessage());
-                }
-            }
+        if (getPromiseStatus() != Status.PENDING) {
+            return;
+        }
+        promiseStatus = Status.FULFILLED;
+        returnValue = ValueOrError.Value.of(value);
+        
+        while (hasNextResolve()) {
+            Function<V, ?> callback = getNextResolve();
+            callback.apply(value);
         }
     }
     
     private void onReject(Throwable error) {
-        synchronized(promState) {
-        if (promState.promiseStatus != Status.PENDING) {
-                return;
-            }
-            promState.promiseStatus = Status.REJECTED;
-            promState.returnValue = ValueOrError.Error.of(error);
+        if (getPromiseStatus() != Status.PENDING) {
+            return;
+        }
 
-            while (promState.hasNextReject()) {
-                Consumer<Throwable> callback = promState.getNextReject();
-                try {
-                    callback.accept(error);
-                } 
-                catch (Exception e) {
-                    System.err.println("Error in reject callback: " + e.getMessage());
-                }
-            }
+        setPromiseStatus(Status.REJECTED);
+        setValueOrError(ValueOrError.Error.of(error));
+
+        while (hasNextReject()) {
+            Consumer<Throwable> callback = getNextReject();
+            callback.accept(error);
         }
     }
 
     public <T> Promise<T> then(Function<V, T> onResolve, Consumer<Throwable> onReject) {
         return new Promise<>((resolve, reject) -> {
-            synchronized(promState) {
-                if (promState.promiseStatus == Status.PENDING) {
-                    promState.addToFulfQueue(value -> {
-                        try {
-                            T result = onResolve.apply(value);
-                            resolve.accept(result);
-                            return result;
-                        } catch (Exception e) {
-                            reject.accept(e);
-                            throw e;
-                        }
-                    });
-
-                    promState.addToRejQueue(error -> {
-                        try {
-                            onReject.accept(error); 
-                            reject.accept(error);
-                        } 
-                        catch (Exception e) {
-                            reject.accept(e);
-                            throw e;
-                        }
-                    });
-                } 
-                else if (promState.promiseStatus == Status.FULFILLED) {
+            if (getPromiseStatus() == Status.PENDING) {
+                addToFulfQueue(value -> {
                     try {
-                        T result = onResolve.apply(promState.returnValue.value());
+                        T result = onResolve.apply(value);
                         resolve.accept(result);
+                        return result;
                     } 
                     catch (Exception e) {
                         reject.accept(e);
+                        return null;
                     }
-                }
-                else if (promState.promiseStatus == Status.REJECTED) {
+                });
+
+                addToRejQueue(error -> {
                     try {
-                        onReject.accept(promState.returnValue.error());
-                        reject.accept(promState.returnValue.error());
+                        onReject.accept(error); 
+                        reject.accept(error);
                     } 
                     catch (Exception e) {
                         reject.accept(e);
                     }
+                });
+            } 
+            else if (promiseStatus == Status.FULFILLED) {
+                try {
+                    T result = onResolve.apply(returnValue.value());
+                    resolve.accept(result);
+                } 
+                catch (Exception e) {
+                    reject.accept(e);
+                }
+            }
+            else if (getPromiseStatus() == Status.REJECTED) {
+                try {
+                    onReject.accept(getValueOrError().error());
+                    reject.accept(getValueOrError().error());
+                } 
+                catch (Exception e) {
+                    reject.accept(e);
                 }
             }
         });
@@ -197,31 +190,29 @@ public class Promise<V> {
 
     public Promise<V> andFinally(Consumer<ValueOrError<V>> onSettle) {
         return new Promise<>((resolve, reject) -> {
-            synchronized(promState) {
-                if (promState.promiseStatus == Status.PENDING) {
+            if (getPromiseStatus() == Status.PENDING) {
 
-                    promState.addToFulfQueue(value -> {
-                        onSettle.accept(ValueOrError.Value.of(value));
-                        resolve.accept(value);
-                        return null;
-                    });
-    
-                    promState.addToRejQueue(error -> {
-                        onSettle.accept(ValueOrError.Error.of(error));
-                        reject.accept(error);
-                    });
+                addToFulfQueue(value -> {
+                    onSettle.accept(ValueOrError.Value.of(value));
+                    resolve.accept(value);
+                    return null;
+                });
+
+                addToRejQueue(error -> {
+                    onSettle.accept(ValueOrError.Error.of(error));
+                    reject.accept(error);
+                });
+            } 
+            else {
+                if (getPromiseStatus() == Status.FULFILLED) {
+                    V value = getValueOrError().value();
+                    onSettle.accept(ValueOrError.Value.of(value));
+                    resolve.accept(value);
                 } 
-                else {
-                    if (promState.promiseStatus == Status.FULFILLED) {
-                        V value = promState.returnValue.value();
-                        onSettle.accept(ValueOrError.Value.of(value));
-                        resolve.accept(value);
-                    } 
-                    else if (promState.promiseStatus == Status.REJECTED) {
-                        Throwable error = promState.returnValue.error();
-                        onSettle.accept(ValueOrError.Error.of(error));
-                        reject.accept(error);
-                    }
+                else if (getPromiseStatus() == Status.REJECTED) {
+                    Throwable error = getValueOrError().error();
+                    onSettle.accept(ValueOrError.Error.of(error));
+                    reject.accept(error);
                 }
             }
         });
