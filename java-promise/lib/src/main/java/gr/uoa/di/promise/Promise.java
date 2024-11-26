@@ -3,8 +3,13 @@ package gr.uoa.di.promise;
 import java.util.List;
 import java.util.function.Consumer;
 import java.util.function.Function;
+import java.lang.module.ResolutionException;
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.LinkedList;
 import java.util.Queue;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 
 
 /*
@@ -44,60 +49,66 @@ public class Promise<V> {
         REJECTED
     }
 
-    volatile public Status promiseStatus;
-    volatile public ValueOrError<V> returnValue;
+    class PromiseData {
 
-    private Queue<Function<V, ?>> fulfilledQueue;
-    private Queue<Consumer<Throwable>> rejectedQueue;
+        private Status promiseStatus;
+        private ValueOrError<V> returnValue;
+        private final Queue<Function<V, ?>> fulfilledQueue;
+        private final Queue<Consumer<Throwable>> rejectedQueue;
+    
+        public PromiseData() {
+            promiseStatus = Status.PENDING;
+            returnValue = null;
+            fulfilledQueue = new LinkedList<>();
+            rejectedQueue = new LinkedList<>();
+        }
+    
+        public synchronized Status getPromiseStatus() {
+            return promiseStatus;
+        }
+    
+        public synchronized void setPromiseStatus(Status status) {
+            this.promiseStatus = status;
+        }
+    
+        public synchronized ValueOrError<V> getReturnValue() {
+            return returnValue;
+        }
+    
+        public synchronized void setReturnValue(ValueOrError<V> returnValue) {
+            this.returnValue = returnValue;
+        }
+    
+        public synchronized void addToFulfQueue(Function<V, ?> callback) {
+            fulfilledQueue.add(callback);
+        }
+    
+        public synchronized Function<V, ?> getNextResolve() {
+            return fulfilledQueue.poll();
+        }
+    
+        public synchronized boolean hasNextResolve() {
+            return !fulfilledQueue.isEmpty();
+        }
+    
+        public synchronized void addToRejQueue(Consumer<Throwable> callback) {
+            rejectedQueue.add(callback);
+        }
+    
+        public synchronized Consumer<Throwable> getNextReject() {
+            return rejectedQueue.poll();
+        }
+    
+        public synchronized boolean hasNextReject() {
+            return !rejectedQueue.isEmpty();
+        }
+    }
+
+    public PromiseData promData;
 
     public Promise(PromiseExecutor<V> executor) {
-        promiseStatus = Status.PENDING;
-        
-        fulfilledQueue = new LinkedList<>();
-        rejectedQueue = new LinkedList<>();
-        returnValue = null;
-        
+        this.promData = new PromiseData();
         startPromise(executor);
-    }
-
-    private synchronized void setPromiseStatus(Status stat) {
-        promiseStatus = stat;
-    }
-
-    private synchronized Status getPromiseStatus() {
-        return promiseStatus;
-    }
-
-    private synchronized void setValueOrError(ValueOrError<V> val) {
-        returnValue = val;
-    }
-
-    private synchronized ValueOrError<V> getValueOrError() {
-        return returnValue;
-    }
-
-    private synchronized void addToFulfQueue(Function<V, ?> onResolve) {
-        fulfilledQueue.add(onResolve);
-    }
-
-    private synchronized Function<V, ?> getNextResolve() {
-        return fulfilledQueue.poll();
-    }
-
-    private synchronized boolean hasNextResolve() {
-        return !fulfilledQueue.isEmpty();
-    }
-
-    private synchronized void addToRejQueue(Consumer<Throwable> onReject) {
-        rejectedQueue.add(onReject);
-    }
-
-    private synchronized Consumer<Throwable> getNextReject() {
-        return rejectedQueue.poll();
-    }
-
-    private synchronized boolean hasNextReject() {
-        return !rejectedQueue.isEmpty();
     }
 
     private void startPromise(PromiseExecutor<V> executor) {
@@ -107,36 +118,36 @@ public class Promise<V> {
     }
 
     private void onResolve(V value) {
-        if (getPromiseStatus() != Status.PENDING) {
+        if (promData.getPromiseStatus() != Status.PENDING) 
             return;
-        }
-        promiseStatus = Status.FULFILLED;
-        returnValue = ValueOrError.Value.of(value);
-        
-        while (hasNextResolve()) {
-            Function<V, ?> callback = getNextResolve();
+
+        promData.setPromiseStatus(Status.FULFILLED);
+        promData.setReturnValue(ValueOrError.Value.of(value));
+
+        while (promData.hasNextResolve()) {
+            Function<V, ?> callback = promData.getNextResolve();
             callback.apply(value);
         }
     }
-    
+
     private void onReject(Throwable error) {
-        if (getPromiseStatus() != Status.PENDING) {
+        if (promData.getPromiseStatus() != Status.PENDING) 
             return;
-        }
 
-        setPromiseStatus(Status.REJECTED);
-        setValueOrError(ValueOrError.Error.of(error));
+        promData.setPromiseStatus(Status.REJECTED);
+        promData.setReturnValue(ValueOrError.Error.of(error));
 
-        while (hasNextReject()) {
-            Consumer<Throwable> callback = getNextReject();
+        while (promData.hasNextReject()) {
+            Consumer<Throwable> callback = promData.getNextReject();
             callback.accept(error);
         }
     }
 
     public <T> Promise<T> then(Function<V, T> onResolve, Consumer<Throwable> onReject) {
         return new Promise<>((resolve, reject) -> {
-            if (getPromiseStatus() == Status.PENDING) {
-                addToFulfQueue(value -> {
+            if (promData.getPromiseStatus() == Status.PENDING) {
+                
+                promData.addToFulfQueue(value -> {
                     try {
                         T result = onResolve.apply(value);
                         resolve.accept(result);
@@ -148,7 +159,7 @@ public class Promise<V> {
                     }
                 });
 
-                addToRejQueue(error -> {
+                promData.addToRejQueue(error -> {
                     try {
                         onReject.accept(error); 
                         reject.accept(error);
@@ -158,19 +169,19 @@ public class Promise<V> {
                     }
                 });
             } 
-            else if (promiseStatus == Status.FULFILLED) {
+            else if (promData.getPromiseStatus() == Status.FULFILLED) {
                 try {
-                    T result = onResolve.apply(returnValue.value());
+                    T result = onResolve.apply(promData.getReturnValue().value());
                     resolve.accept(result);
                 } 
                 catch (Exception e) {
                     reject.accept(e);
                 }
             }
-            else if (getPromiseStatus() == Status.REJECTED) {
+            else if (promData.getPromiseStatus() == Status.REJECTED) {
                 try {
-                    onReject.accept(getValueOrError().error());
-                    reject.accept(getValueOrError().error());
+                    onReject.accept(promData.getReturnValue().error());
+                    reject.accept(promData.getReturnValue().error());
                 } 
                 catch (Exception e) {
                     reject.accept(e);
@@ -190,27 +201,27 @@ public class Promise<V> {
 
     public Promise<V> andFinally(Consumer<ValueOrError<V>> onSettle) {
         return new Promise<>((resolve, reject) -> {
-            if (getPromiseStatus() == Status.PENDING) {
+            if (promData.getPromiseStatus() == Status.PENDING) {
 
-                addToFulfQueue(value -> {
+                promData.addToFulfQueue(value -> {
                     onSettle.accept(ValueOrError.Value.of(value));
                     resolve.accept(value);
                     return null;
                 });
 
-                addToRejQueue(error -> {
+                promData.addToRejQueue(error -> {
                     onSettle.accept(ValueOrError.Error.of(error));
                     reject.accept(error);
                 });
             } 
             else {
-                if (getPromiseStatus() == Status.FULFILLED) {
-                    V value = getValueOrError().value();
+                if (promData.getPromiseStatus() == Status.FULFILLED) {
+                    V value = promData.getReturnValue().value();
                     onSettle.accept(ValueOrError.Value.of(value));
                     resolve.accept(value);
                 } 
-                else if (getPromiseStatus() == Status.REJECTED) {
-                    Throwable error = getValueOrError().error();
+                else if (promData.getPromiseStatus() == Status.REJECTED) {
+                    Throwable error = promData.getReturnValue().error();
                     onSettle.accept(ValueOrError.Error.of(error));
                     reject.accept(error);
                 }
@@ -231,18 +242,136 @@ public class Promise<V> {
     }
 
     public static Promise<ValueOrError<?>> race(List<Promise<?>> promises) {
-        throw new UnsupportedOperationException("IMPLEMENT ME");
+        return new Promise<>((resolve, reject) -> {
+            for (Promise<?> promise : promises) {
+                promise.then((result) -> {
+                    resolve.accept(ValueOrError.Value.of(result));
+                    return result;
+                },
+                (result) -> {
+                    reject.accept(result);
+                });
+            }
+        });
     }
 
     public static Promise<?> any(List<Promise<?>> promises) {
-        throw new UnsupportedOperationException("IMPLEMENT ME");
+        if (promises.isEmpty()) {
+            // Immediately reject if the input list is empty
+            return new Promise<>((resolve, reject) -> {
+                reject.accept(new Throwable("No promises provided"));
+            });
+        }
+    
+        AtomicBoolean resolved = new AtomicBoolean(false);
+        AtomicInteger remaining = new AtomicInteger(promises.size());
+    
+        return new Promise<>((resolve, reject) -> {
+            for (Promise<?> promise : promises) {
+                promise.then(
+                    (result) -> {
+                        // Resolve as soon as one promise fulfills
+                        if (resolved.compareAndSet(false, true)) {
+                            resolve.accept(result);
+                        }
+                        return result;
+                    },
+                    (error) -> {
+                        // Check if all promises are rejected
+                        if (remaining.decrementAndGet() == 0 && resolved.compareAndSet(false, true)) {
+                            reject.accept(new Throwable("All promises were rejected"));
+                        }
+                    }
+                );
+            }
+        });
     }
-
     public static Promise<List<?>> all(List<Promise<?>> promises) {
-        throw new UnsupportedOperationException("IMPLEMENT ME");
+    if (promises.isEmpty()) {
+        // Return immediately with an empty list if no promises are provided
+        return new Promise<>((resolve, reject) -> resolve.accept(new LinkedList<>()));
     }
 
-    public static Promise<List<ValueOrError<?>>> allSettled(List<Promise<?>> promises) {
-        throw new UnsupportedOperationException("IMPLEMENT ME");
-    }
+    List<Object> retList = Collections.synchronizedList(new ArrayList<>());
+    AtomicInteger remaining = new AtomicInteger(promises.size());
+    AtomicBoolean rejected = new AtomicBoolean(false);
+
+    return new Promise<>((resolve, reject) -> {
+        for (int i = 0; i < promises.size(); i++) {
+            final int index = i; // Capture index for ordered results
+            Promise<?> promise = promises.get(i);
+
+            promise.then(
+                (result) -> {
+                    synchronized (retList) {
+                        // Store the result in the correct order
+                        while (retList.size() <= index) {
+                            retList.add(null); // Ensure capacity
+                        }
+                        retList.set(index, result);
+                    }
+
+                    // Check if all promises have resolved
+                    if (remaining.decrementAndGet() == 0 && !rejected.get()) {
+                        resolve.accept(retList);
+                    }
+                    return result;
+                },
+                (error) -> {
+                    // Reject immediately on the first error
+                    if (rejected.compareAndSet(false, true)) {
+                        reject.accept(error);
+                    }
+                }
+            );
+        }
+    });
+}
+
+public static Promise<List<ValueOrError<?>>> allSettled(List<Promise<?>> promises) {
+    return new Promise<>((resolve, reject) -> {
+        if (promises.isEmpty()) {
+            // If no promises are provided, resolve immediately with an empty list
+            resolve.accept(Collections.emptyList());
+            return;
+        }
+
+        List<ValueOrError<?>> results = Collections.synchronizedList(new ArrayList<>());
+        AtomicInteger remaining = new AtomicInteger(promises.size());
+
+        for (int i = 0; i < promises.size(); i++) {
+            final int index = i; // Capture index for preserving order
+            Promise<?> promise = promises.get(i);
+
+            promise.then(
+                (result) -> {
+                    synchronized (results) {
+                        // Ensure list size matches the input size
+                        while (results.size() <= index) {
+                            results.add(null);
+                        }
+                        results.set(index, ValueOrError.Value.of(result));
+                    }
+                    if (remaining.decrementAndGet() == 0) {
+                        resolve.accept(results);
+                    }
+                    return result;
+                },
+                (error) -> {
+                    synchronized (results) {
+                        // Ensure list size matches the input size
+                        while (results.size() <= index) {
+                            results.add(null);
+                        }
+                        results.set(index, ValueOrError.Error.of(error));
+                    }
+                    if (remaining.decrementAndGet() == 0) {
+                        resolve.accept(results);
+                    }
+                }
+            );
+        }
+    });
+}
+
 }
