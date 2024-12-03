@@ -1,12 +1,9 @@
 package gr.uoa.di.promise;
 
 import java.util.List;
+import java.util.ArrayList;
 import java.util.function.Consumer;
 import java.util.function.Function;
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.LinkedList;
-import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /*
@@ -165,11 +162,10 @@ public class Promise<V> {
     }
 
     public static Promise<?> any(List<Promise<?>> promises) {
-        if (promises.isEmpty()) {
+        if (promises.isEmpty())
             return new Promise<>((resolve, reject) -> {
                 reject.accept(new Throwable("Empty List Of Promises"));
             });
-        }
     
         AtomicInteger remPromises = new AtomicInteger(promises.size());
         return new Promise<>((resolve, reject) -> {
@@ -192,92 +188,81 @@ public class Promise<V> {
     }
 
     public static Promise<List<?>> all(List<Promise<?>> promises) {
-    if (promises.isEmpty()) {
-        // Return immediately with an empty list if no promises are provided
-        return new Promise<>((resolve, reject) -> resolve.accept(new LinkedList<>()));
-    }
+        if (promises.isEmpty())
+            return new Promise<>((resolve, reject) -> resolve.accept(new ArrayList<>()));
 
-    List<Object> retList = Collections.synchronizedList(new ArrayList<>());
-    AtomicInteger remaining = new AtomicInteger(promises.size());
-    AtomicBoolean rejected = new AtomicBoolean(false);
+        List<Object> retPromisesList = new ArrayList<>();
+        promises.stream()
+                .forEach(promise -> {
+                    retPromisesList.add(null);
+                });
+        
+        AtomicInteger remainingPromises = new AtomicInteger(promises.size());
 
-    return new Promise<>((resolve, reject) -> {
-        for (int i = 0; i < promises.size(); i++) {
-            
-            final int index = i; // Capture index for ordered results
-            Promise<?> promise = promises.get(i);
-
-            promise.then(
-                (result) -> {
-                    synchronized (retList) {
-                        // Store the result in the correct order
-                        while (retList.size() <= index) {
-                            retList.add(null); // Ensure capacity
+        return new Promise<>((resolve, reject) -> {
+            for (int i = 0; i < promises.size(); i++){
+                final int promIndex = i;
+                promises.get(i).then(
+                    (result) -> {
+                        synchronized (retPromisesList) {
+                            retPromisesList.set(promIndex, result);
                         }
-                        retList.set(index, result);
-                    }
-
-                    // Check if all promises have resolved
-                    if (remaining.decrementAndGet() == 0 && !rejected.get()) {
-                        resolve.accept(retList);
-                    }
-                    return result;
-                },
-                (error) -> {
-                    // Reject immediately on the first error
-                    if (rejected.compareAndSet(false, true)) {
+                        int remaining = remainingPromises.decrementAndGet();
+                        if (remaining == 0)
+                            resolve.accept(retPromisesList);
+                        
+                        return result;
+                    },
+                    (error) -> {
                         reject.accept(error);
                     }
-                }
-            );
-        }
-    });
-}
+                );
+            }
+        });
+    }
 
-public static Promise<List<ValueOrError<?>>> allSettled(List<Promise<?>> promises) {
-    return new Promise<>((resolve, reject) -> {
-        if (promises.isEmpty()) {
-            // If no promises are provided, resolve immediately with an empty list
-            resolve.accept(Collections.emptyList());
-            return;
-        }
+    public static Promise<List<ValueOrError<?>>> allSettled(List<Promise<?>> promises) {
 
-        List<ValueOrError<?>> results = Collections.synchronizedList(new ArrayList<>());
-        AtomicInteger remaining = new AtomicInteger(promises.size());
+        if (promises.isEmpty())
+            return new Promise<>((resolve, reject) -> {
+                resolve.accept(new ArrayList<>());
+            });
 
-        for (int i = 0; i < promises.size(); i++) {
-            final int index = i; // Capture index for preserving order
-            Promise<?> promise = promises.get(i);
+        List<ValueOrError<?>> retPromisesList = new ArrayList<>();
+        promises.stream()
+                .forEach(promise -> {
+                    retPromisesList.add(null);
+                });
+        
+        AtomicInteger remainingPromises = new AtomicInteger(promises.size());
 
-            promise.then(
-                (result) -> {
-                    synchronized (results) {
-                        // Ensure list size matches the input size
-                        while (results.size() <= index) {
-                            results.add(null);
+        return new Promise<>((resolve, reject) -> {
+            for (int i = 0; i < promises.size(); i++) {
+                final int promIndex = i;
+                promises.get(i).then(
+                    (result) -> {
+                        synchronized (retPromisesList) {
+                            retPromisesList.set(promIndex, ValueOrError.Value.of(result));
                         }
-                        results.set(index, ValueOrError.Value.of(result));
-                    }
-                    if (remaining.decrementAndGet() == 0) {
-                        resolve.accept(results);
-                    }
-                    return result;
-                },
-                (error) -> {
-                    synchronized (results) {
-                        // Ensure list size matches the input size
-                        while (results.size() <= index) {
-                            results.add(null);
+                        int remaining = remainingPromises.decrementAndGet();
+
+                        if (remaining == 0)
+                            resolve.accept(retPromisesList);
+                        
+                        return result;
+                    },
+                    (error) -> {
+                        synchronized (retPromisesList) {
+                            retPromisesList.set(promIndex, ValueOrError.Error.of(error));
                         }
-                        results.set(index, ValueOrError.Error.of(error));
+                        int remaining = remainingPromises.decrementAndGet();
+
+                        if (remaining == 0)
+                            resolve.accept(retPromisesList);
                     }
-                    if (remaining.decrementAndGet() == 0) {
-                        resolve.accept(results);
-                    }
-                }
-            );
-        }
-    });
-}
+                );
+            }
+        });
+    }
 
 }
