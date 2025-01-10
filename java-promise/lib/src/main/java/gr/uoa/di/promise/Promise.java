@@ -43,40 +43,54 @@ public class Promise<V> {
         REJECTED
     }
 
+    // Promise state update
     private volatile Status promiseStatus;
+
+    // Get the return value of each settled promise
     private volatile ValueOrError<V> returnValue;
 
     public Promise(PromiseExecutor<V> executor) {
+        // Init promise status as 'pending' and create a new thread for each promise
         promiseStatus = Status.PENDING;
         makePromise(executor);
     }
 
     private void makePromise(PromiseExecutor<V> executor) {
+        // New promise thread
         new Thread(() -> {
             executor.execute(this::resolvePromise, this::rejectPromise);
         }).start();
     }
 
     private synchronized void resolvePromise(V value) {
+
+        // Resolve/reject once
         if (promiseStatus != Status.PENDING)
             return;
 
+        // Update status and store return value
         promiseStatus = Status.FULFILLED;
         returnValue = ValueOrError.Value.of(value);
-
+        
+        // Source promise thread needs to wake up all the pending promises
         notifyAll();
     }
 
     private synchronized void rejectPromise(Throwable error) {
+
+        // Resolve/reject once
         if (promiseStatus != Status.PENDING)
             return;
 
+        // Update status and store return value
         promiseStatus = Status.REJECTED;
         returnValue = ValueOrError.Error.of(error);
 
+        // Source promise thread needs to wake up all the pending promises
         notifyAll();
     }
 
+    // Wait for the promise to be settled before continuing down the 'chain'
     private synchronized void waitPendingPromise() {
         while (promiseStatus == Status.PENDING) {
             try {
@@ -88,6 +102,7 @@ public class Promise<V> {
         }
     }
 
+    // Used in 'then' function. Based on the promise status call resolve/reject methods
     private <T> void settlePromise(Function<V, T> onResolve, Consumer<Throwable> onReject, 
                                 Consumer<T> resolve, Consumer<Throwable> reject)
     {
@@ -110,18 +125,18 @@ public class Promise<V> {
 
     public <T> Promise<T> then(Function<V, T> onResolve, Consumer<Throwable> onReject) {
         return new Promise<>((resolve, reject) -> {
-            waitPendingPromise();
-            settlePromise(onResolve, onReject, resolve, reject);
+            waitPendingPromise(); // Wait if needed
+            settlePromise(onResolve, onReject, resolve, reject); // Then settle the promise!
         });
     }
 
     public <T> Promise<T> then(Function<V, T> onResolve) {
-        return then(onResolve, (error) -> {});
+        return then(onResolve, null);
     }
 
     // catch is a reserved word in Java.
     public Promise<?> catchError(Consumer<Throwable> onReject) {
-        return then((value) -> {return value;}, onReject);
+        return then(null, onReject);
     }
 
     public Promise<V> andFinally(Consumer<ValueOrError<V>> onSettle) {
@@ -147,6 +162,7 @@ public class Promise<V> {
         });
     }
 
+    // Return first promise that settles
     public static Promise<ValueOrError<?>> race(List<Promise<?>> promises) {
         return new Promise<>((resolve, reject) -> {
             for (Promise<?> promise : promises) {
@@ -161,12 +177,14 @@ public class Promise<V> {
         });
     }
 
+    // Get first fulfillment value. Reject only when all promises reject
     public static Promise<?> any(List<Promise<?>> promises) {
         if (promises.isEmpty())
             return new Promise<>((resolve, reject) -> {
                 reject.accept(new Throwable("Empty List Of Promises"));
             });
-    
+        
+        // Count remaining non-rejected promises
         AtomicInteger remPromises = new AtomicInteger(promises.size());
         return new Promise<>((resolve, reject) -> {
             for (Promise<?> promise : promises) {
@@ -187,16 +205,17 @@ public class Promise<V> {
         });
     }
 
+    // Fulfills when all promises fulfill. If any promise rejects then returns a rejected promise.
     public static Promise<List<?>> all(List<Promise<?>> promises) {
         if (promises.isEmpty())
             return new Promise<>((resolve, reject) -> resolve.accept(new ArrayList<>()));
 
+        // Returned promises need to be in passed order, regardless of the completition order
         List<Object> retPromisesList = new ArrayList<>();
         promises.stream()
-                .forEach(promise -> {
-                    retPromisesList.add(null);
-                });
+                .forEach(promise -> retPromisesList.add(null));
         
+        // Count if all promises fulfilled
         AtomicInteger remainingPromises = new AtomicInteger(promises.size());
 
         return new Promise<>((resolve, reject) -> {
@@ -221,18 +240,18 @@ public class Promise<V> {
         });
     }
 
+    // Promise fulfills when all promises settle
     public static Promise<List<ValueOrError<?>>> allSettled(List<Promise<?>> promises) {
 
         if (promises.isEmpty())
             return new Promise<>((resolve, reject) -> {
                 resolve.accept(new ArrayList<>());
             });
-
+        
+        // Returned promises need to be in passed order, regardless of the completition order
         List<ValueOrError<?>> retPromisesList = new ArrayList<>();
         promises.stream()
-                .forEach(promise -> {
-                    retPromisesList.add(null);
-                });
+                .forEach(promise -> retPromisesList.add(null));
         
         AtomicInteger remainingPromises = new AtomicInteger(promises.size());
 
